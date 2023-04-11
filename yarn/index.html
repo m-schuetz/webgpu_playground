@@ -1,0 +1,232 @@
+<html>
+<head>
+	<meta http-equiv="origin-trial" content="ApM2LRrizp8n6n1p9IaYNL9tbGYTRob0jgm5wOr1jPQeXXyKTqNbaZKaC2LgVTyizCde6tC6XL0ZeH28L/z3EAEAAABdeyJvcmlnaW4iOiJodHRwczovL3BvdHJlZS5vcmc6NDQzIiwiZmVhdHVyZSI6IldlYkdQVSIsImV4cGlyeSI6MTY0MzE1NTE5OSwiaXNTdWJkb21haW4iOnRydWV9">
+</head>
+<body>
+
+<style>
+
+body{
+	margin: 0px;
+	padding: 0px;
+}
+
+#canvas{
+	width: 100%;
+	height: 100%;
+	margin: 0px;
+	padding: 0px;
+}
+
+#rendermode_container{
+	background-color: white;
+	padding: 5px;
+	border: 2px solid black;
+	font-family: Arial, Helvetica, sans-serif;
+}
+
+</style>
+
+<div style="display: grid; width: 100%; height: 100%; grid-template-columns: 400px 1fr">
+	<div id="rendermode_container">
+
+		Implementation of <a href="https://twitter.com/keenanisalive/status/1640371889846771713" target="_blank">
+			Keenan Crane's yarn function</a> in WebGPU.
+		
+		<div>
+			<input type="range" id="val_h" name="h" min="0" max="5" step="0.1" value="4.0">
+			<label for="h">h</label>
+		</div>
+		<div>
+			<input type="range" id="val_a" name="a" min="0" max="5" step="0.1" value="1.5">
+			<label for="a">a</label>
+		</div>
+		<div>
+			<input type="range" id="val_d" name="d" min="0" max="5" step="0.1" value="1.0">
+			<label for="d">d</label>
+		</div>
+		<div>
+			<input type="range" id="val_thickness" name="thickness" min="0.1" max="5" step="0.1" value="1.0">
+			<label for="thickness">thickness</label>
+		</div>
+		<div>
+			<input type="range" id="val_num_rows" name="num_rows" min="1" max="4" step="1" value="4">
+			<label for="num_rows">number of rows</label>
+		</div>
+		<div>
+			<input type="checkbox" id="val_animate" name="animate" checked>
+			<label for="animate">animate</label>
+		</div>
+		<div>
+			<input type="checkbox" id="val_show_yarn" name="show_yarn" checked>
+			<label for="show_yarn">show yarn</label>
+		</div>
+		<div>
+			<input type="checkbox" id="val_show_lines" name="show_lines">
+			<label for="show_lines">show lines</label>
+		</div>
+		
+
+		<br>
+		Uses a compute shader to create the geometry, and an indirect draw call to render it.
+
+		<br><br>
+		<a href="https://github.com/m-schuetz/webgpu_playground">[github]</a>
+	</div>
+	<div>
+		<canvas id="canvas"></canvas>
+	</div>
+</div>
+
+
+
+<script type="module">
+	// adapted from https://github.com/toji/hello-triangle-webgpu 
+
+	import {bunny} from "./bunny.js";
+	import {cube} from "./cube.js";
+	import {mat4, vec3} from "./libs/gl-matrix/gl-matrix.js";
+	import {renderMesh} from "./renderMesh.js";
+	import {renderLines} from "./renderLines.js";
+	import {computeYarn} from "./computeYarn.js";
+	import {createRenderer} from "./renderer.js";
+
+	let canvas  = document.getElementById("canvas");
+	let renderer = await createRenderer(canvas);
+
+	let vertexCapacity = 500_000;
+	let bufIndirect = renderer.device.createBuffer({
+		size: 512,
+		usage: GPUBufferUsage.VERTEX 
+			| GPUBufferUsage.INDEX  
+			| GPUBufferUsage.COPY_DST 
+			| GPUBufferUsage.COPY_SRC 
+			| GPUBufferUsage.STORAGE
+			| GPUBufferUsage.INDIRECT,
+		mappedAtCreation: false,
+	});
+
+	let bufPositions = renderer.device.createBuffer({
+		size: 12 * vertexCapacity,
+		usage: GPUBufferUsage.VERTEX 
+			| GPUBufferUsage.INDEX  
+			| GPUBufferUsage.COPY_DST 
+			| GPUBufferUsage.COPY_SRC 
+			| GPUBufferUsage.STORAGE,
+		mappedAtCreation: false,
+	});
+
+	let bufColors = renderer.device.createBuffer({
+		size: 4 * vertexCapacity,
+		usage: GPUBufferUsage.VERTEX 
+			| GPUBufferUsage.INDEX  
+			| GPUBufferUsage.COPY_DST 
+			| GPUBufferUsage.COPY_SRC 
+			| GPUBufferUsage.STORAGE,
+		mappedAtCreation: false,
+	});
+
+	let model = {
+		vertexCapacity,
+		positions: bufPositions,
+		colors: bufColors,
+		indirect: bufIndirect
+	};
+
+	let bufIndirectLines = renderer.device.createBuffer({
+		size: 512,
+		usage: GPUBufferUsage.VERTEX 
+			| GPUBufferUsage.INDEX  
+			| GPUBufferUsage.COPY_DST 
+			| GPUBufferUsage.COPY_SRC 
+			| GPUBufferUsage.STORAGE
+			| GPUBufferUsage.INDIRECT,
+		mappedAtCreation: false,
+	});
+
+	let linesCapacity = 300_000;
+	let bufLines = renderer.device.createBuffer({
+		size: 32 * linesCapacity,
+		usage: GPUBufferUsage.VERTEX 
+			| GPUBufferUsage.INDEX  
+			| GPUBufferUsage.COPY_DST 
+			| GPUBufferUsage.COPY_SRC 
+			| GPUBufferUsage.STORAGE,
+		mappedAtCreation: false,
+	});
+	let lines = {
+		linesCapacity,
+		indirect: bufIndirectLines,
+		buffer: bufLines,
+	};
+
+	let el_animate = document.getElementById("val_animate");
+	let el_show_yarn = document.getElementById("val_show_yarn");
+	let el_show_lines = document.getElementById("val_show_lines");
+
+	let lastTime = performance.now() / 1000;
+	let time = 2.2;
+
+	function loop(){
+
+		let now = performance.now() / 1000;
+		let timeSinceLastFrame = now - lastTime;
+		lastTime = now;
+
+		if(el_animate.checked){
+			time = time + timeSinceLastFrame / 3.0;
+		}
+
+		let renderPassDescriptor = {
+			colorAttachments: [{
+				view:         renderer.context.getCurrentTexture().createView(), 
+				loadOp:       "clear",
+				clearValue:   [0.1, 0.2, 0.3, 1.0],
+				storeOp:      "store",
+			}],
+			depthStencilAttachment: {
+				view:             renderer.depth.createView(),
+				depthClearValue:  1.0,
+				depthLoadOp:      "clear",
+				depthStoreOp:     "store",
+			},
+		};
+
+		let commandEncoder = renderer.device.createCommandEncoder();
+
+		let elMesh = document.getElementById("rendermode_mesh");
+		let elWireframe = document.getElementById("rendermode_wireframe");
+		let elWireframeThick = document.getElementById("rendermode_wireframe_thick");
+		let elQuads = document.getElementById("rendermode_quads");
+
+		let view = mat4.create();
+		mat4.translate(view, view, vec3.fromValues(0, 0, -30));
+		// time = .294;
+		mat4.rotate(view, view, time, vec3.fromValues(0, 1, 0));
+
+
+		computeYarn(model, lines, view, renderer, commandEncoder);
+
+		let passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+
+		if(el_show_yarn.checked){
+			renderMesh(model, view, renderer, passEncoder);
+		}
+
+		if(el_show_lines.checked){
+			renderLines(lines, view, renderer, passEncoder);
+		}
+
+		passEncoder.end();
+		let commandBuffer = commandEncoder.finish();
+		renderer.device.queue.submit([commandBuffer]);
+
+		requestAnimationFrame(loop);
+	}
+
+	loop();
+
+</script>
+
+</body>
+</html>
