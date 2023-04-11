@@ -54,6 +54,7 @@ struct VertexOutput {
 	@location(0)         color    : vec4<f32>,
 };
 
+// Basic parametric yarn, see: http://www.cs.cmu.edu/~kmcrane/Projects/Other/YarnCurve.pdf
 fn sample(t : f32, h : f32, a : f32, d : f32) -> vec3<f32> {
 	var x = t + a * sin(2.0f * t);
 	var y = h * cos(t);
@@ -62,6 +63,7 @@ fn sample(t : f32, h : f32, a : f32, d : f32) -> vec3<f32> {
 	return vec3<f32>(x, y, z);
 }
 
+// Put the line into a line buffer, which is drawn afterwards by a separate render pass
 fn drawLine(start : vec3<f32>, end : vec3<f32>, color : u32){
 
 	var line = Line();
@@ -76,10 +78,9 @@ fn drawLine(start : vec3<f32>, end : vec3<f32>, color : u32){
 fn createYarn(threadID : u32, h : f32, a : f32, d : f32, offset : vec3<f32>){
 
 	var r = uniforms.thickness;
-	var scale = 1.0f;
 	var factor = 40.0f;
 
-	// each invocation produces one segment
+	// each thread produces one segment
 	var sides = 24u;
 	var trisPerSeg = sides * 2u;
 	var verticesPerSec = trisPerSeg * 3u;
@@ -88,23 +89,23 @@ fn createYarn(threadID : u32, h : f32, a : f32, d : f32, offset : vec3<f32>){
 	var PI = 3.1415f;
 
 	// segment index in target buffer
+	// allocates enough indices for the entire segment
 	var targetIndex = atomicAdd(&indirectArgs.vertexCount, verticesPerSec) / verticesPerSec;
-
-	var epsilon = 0.001f;
 
 	var numThreads = ${numWorkgroups * workgroupSize}u;
 
-	var u0 = (f32(index) + 0.0f) / f32(numThreads);
-	var u1 = (f32(index) + 1.0f) / f32(numThreads);
-
 	var up = vec3<f32>(0.0f, 1.0f, 0.0f);
 
+	// Create multiple samples along line to compute start/end of segment and normals.
+	// 5 samples might be overkill, though. 3 should suffice?
 	var s0  = sample(factor * (f32(index) - 1.0f) / f32(numThreads), h, a, d);
 	var s05 = sample(factor * (f32(index) - 0.5f) / f32(numThreads), h, a, d);
 	var s1  = sample(factor * (f32(index) + 0.0f) / f32(numThreads), h, a, d);
 	var s15 = sample(factor * (f32(index) + 0.5f) / f32(numThreads), h, a, d);
 	var s2  = sample(factor * (f32(index) + 1.0f) / f32(numThreads), h, a, d);
 
+	// directions and normals at both endpoints.
+	// used to properly align the tube.
 	var d_01 = normalize(s1 - s0);
 	var d_12 = normalize(s2 - s1);
 	var N_01 = normalize(cross(d_01, up));
@@ -113,31 +114,28 @@ fn createYarn(threadID : u32, h : f32, a : f32, d : f32, offset : vec3<f32>){
 	var T_12 = normalize(cross(N_12, d_12));
 
 	// some lines as debug output
-	drawLine(s0 * scale + offset, s1 * scale + offset, 0x0000ff00);
-	drawLine((s0 + N_01) * scale + offset, s0 * scale + offset, 0x000000ff);
-	drawLine((s0 + T_01) * scale + offset, s0 * scale + offset, 0x0000ffff);
-	drawLine((s1 + N_12) * scale + offset, s1 * scale + offset, 0x000000ff);
-	drawLine((s1 + T_12) * scale + offset, s1 * scale + offset, 0x0000ffff);
+	drawLine(s0 + offset, s1  + offset, 0x0000ff00);
+	drawLine((s0 + N_01) + offset, s0 + offset, 0x000000ff);
+	drawLine((s0 + T_01) + offset, s0 + offset, 0x0000ffff);
 
 	for(var i = 0u; i < sides; i++){
 
+		// s: progresses the line
+		// v: wraps a circular segment around the line
 		var v0 = f32(i + 0u) / f32(sides);
 		var v1 = f32(i + 1u) / f32(sides);
 
+		// normalized vertices of the current segment
 		var c0 = T_01 * cos(2.0f * PI * v0) + N_01 * sin(2.0f * PI * v0);
 		var c1 = T_01 * cos(2.0f * PI * v1) + N_01 * sin(2.0f * PI * v1);
 		var c10 = T_12 * cos(2.0f * PI * v0) + N_12 * sin(2.0f * PI * v0);
 		var c11 = T_12 * cos(2.0f * PI * v1) + N_12 * sin(2.0f * PI * v1);
-
-		var p3 = s05 + r * c0;
-		var p2 = s15 + r * c10;
-		var p1 = s15 + r * c11;
-		var p0 = s05 + r * c1;
-
-		p3 = scale * p3 + offset;
-		p2 = scale * p2 + offset;
-		p1 = scale * p1 + offset;
-		p0 = scale * p0 + offset;
+		
+		// the 4 vertices of a side of the current segment
+		var p3 = s05 + r * c0 + offset;
+		var p2 = s15 + r * c10 + offset;
+		var p1 = s15 + r * c11 + offset;
+		var p0 = s05 + r * c1 + offset;
 
 		// each side generates 
 		// - two tris
@@ -168,6 +166,7 @@ fn createYarn(threadID : u32, h : f32, a : f32, d : f32, offset : vec3<f32>){
 		positions.values[triOffset + 16] = p3.y;
 		positions.values[triOffset + 17] = p3.z;
 
+		// two point lights
 		var d0 = p1 - p0;
 		var d1 = p2 - p0;
 		var N = normalize(cross(d0, d1));
@@ -213,6 +212,7 @@ fn main(@builtin(global_invocation_id) invocationID : vec3<u32>){
 	var a = uniforms.a;
 	var d = uniforms.d;
 
+	// each thread creates one segment of one or more yarns
 	for(var i = 0u; i < uniforms.numRows; i++){
 		createYarn(invocationID.x, h, a, d, vec3<f32>(-20.0f, f32(i) * h - 5.0f, 0.0f));
 	}
